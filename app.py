@@ -1,218 +1,180 @@
-# -*- coding: utf-8 -*-
-"""
-Microstrip 計算器（Streamlit）
-- 可選未知數：阻抗 Z0、線寬 w、板厚 h、相對介電常數 εr
-- 其餘三個參數作為輸入，透過 Hammerstad-Jensen（準靜態）公式求解
-- 可選擇是否考慮導體厚度 t 的寬度修正（預設 0，單位 mm）
-
-注意：
-- 本程式採用常見、工業界廣泛使用的微帶線近似公式（準靜態，未建模頻散、損耗、綠漆影響）。
-- 作為尺寸初估與快速設計迭代之用；關鍵鏈路仍建議以 2D/3D 場解或板廠阻抗表驗證。
-"""
-import math
-import numpy as np
 import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
+import io
+import pandas as pd
 
-# ------------------------------- 基本設定 -------------------------------
-st.set_page_config(
-    page_title="微帶線計算器 (Hammerstad-Jensen)",
-    page_icon="📐",
-    layout="wide",
+# ---------------------------------
+# Default settings (paper-like)
+# ---------------------------------
+Z_SCAN_MM   = 10.0     # probe height z = 10 mm (paper)
+Y_SPAN_MM   = 30.0     # cross-line span ±30 mm (paper)
+DY_MM       = 1.0      # step 1 mm (paper)
+PIN_DBM     = 0.0      # 0 dBm (paper)
+USE_EDGE    = True     # edge-current crowding ON
+INCLUDE_RET = True     # include ground return (z = -h)
+PROBE_DIAM_MM = 10.0   # loop aperture averaging (approx 10 mm loop)
+FREQ_LIST_GHZ_DEFAULT = '0.5, 1.0, 1.5, 2.0, 2.5, 3.0'
+
+# ---------------------------------
+# Streamlit layout
+# ---------------------------------
+st.set_page_config(page_title='Microstrip Hy Cross-Line (Freq Panels)', layout='wide')
+st.title('Microstrip Near-Field (Hy) — Cross-Line Profile with Frequency Panels')
+
+st.markdown(
+    '只輸入 4 個必要參數：**εr、h、w、t**。其他皆為常見/論文一致的預設值（z=10 mm、±30 mm@1 mm、Pin=0 dBm；含接地回流與邊緣電流擁擠）。' \
+    '下方可輸入**頻率清單（GHz）**，會以 2×3 或 1×N 面板方式呈現；此準靜態橫向模型與頻率無強耦合，' \
+    '因此不同頻率的曲線**形狀相同**（主要差在標題/面板與未來可擴充的頻率效應）。'
 )
 
-st.title("📐 微帶線計算器 — Hammerstad‑Jensen 準靜態公式")
-st.caption("輸入三個參數，解出另一個未知數。單位：幾何量用 mm，阻抗用 Ω。")
+# ---- Inputs ----
+row1 = st.columns(4)
+er = row1[0].number_input('Relative permittivity εr', value=4.35, min_value=1.0, step=0.01)
+h  = row1[1].number_input('Substrate height h [mm]', value=1.6, min_value=0.01, step=0.01) * 1e-3
+w  = row1[2].number_input('Trace width w [mm]', value=3.05, min_value=0.01, step=0.01) * 1e-3
+t  = row1[3].number_input('Copper thickness t [µm]', value=35.0, min_value=1.0, step=1.0) * 1e-6
 
-# ------------------------------- 公式函式 -------------------------------
-# 厚度修正：將實際寬度 w 換算為等效寬度 w_eff（t=0 則不修正）
-def effective_width(w: float, h: float, t: float) -> float:
-    if t is None or t <= 0:
-        return w
-    # 典型 Hammerstad 厚度修正：w' = w + (t/π) * (1 + ln(2h/t))
-    # 保護：避免 t>2h 時取 log(負)；此情形使用最小下界
-    ratio = max(2*h/t, 1e-9)
-    return w + (t/math.pi) * (1 + math.log(ratio))
+row2 = st.columns(2)
+freq_text = row2[0].text_input('Frequency list [GHz] (comma-separated)', value=FREQ_LIST_GHZ_DEFAULT)
+probe_diam_mm = row2[1].slider('Probe loop diameter for averaging [mm]', 0.0, 15.0, PROBE_DIAM_MM, 0.5)
 
-# 有效介電常數 ε_eff（常見簡化形式，u = w_eff/h）
-def epsilon_eff(er: float, w: float, h: float, t: float = 0.0) -> float:
-    w_eff = effective_width(w, h, t)
-    u = max(w_eff / h, 1e-12)
-    base = (er + 1)/2
-    # 補償項在 u<1 時加入 0.04*(1-u)^2
-    corr = 0.04*(1 - u)**2 if u < 1 else 0.0
-    return base + (er - 1)/2 * (1/math.sqrt(1 + 12/u) + corr)
+# ---- Internal defaults ----
+z_scan = Z_SCAN_MM * 1e-3
+y_span = Y_SPAN_MM * 1e-3
+DY = DY_MM * 1e-3
+Pin_dBm = PIN_DBM
 
-# 特性阻抗 Z0（piecewise 形式）
-# 參考常見 Wheeler/Hammerstad-Jensen 準靜態近似
-# u = w_eff/h
+# ---------------------------------
+# Formulas (Hammerstad–Jensen & Biot–Savart)
+# ---------------------------------
 
-def z0_from_wh_er(w: float, h: float, er: float, t: float = 0.0) -> float:
-    assert w > 0 and h > 0 and er > 0
-    w_eff = effective_width(w, h, t)
-    u = max(w_eff / h, 1e-12)
-    eeff = epsilon_eff(er, w, h, t)
+def eps_eff_hj(er, w, h):
+    u = w/h
+    ee = (er + 1)/2 + (er - 1)/2 * 1/np.sqrt(1 + 12/u)
+    if u > 1:
+        ee = (er + 1)/2 + (er - 1)/2 * (1/np.sqrt(1 + 12/u) + 0.04*(1 - u)**2)
+    return ee
+
+
+def Z0_hj(er, w, h):
+    u = w/h
+    ee = eps_eff_hj(er, w, h)
     if u <= 1:
-        return (60.0/math.sqrt(eeff)) * math.log(8.0/u + 0.25*u)
+        Z0 = (60/np.sqrt(ee)) * np.log(8*h/w + w/(4*h))
     else:
-        return (120.0*math.pi) / (math.sqrt(eeff) * (u + 1.393 + 0.667*math.log(u + 1.444)))
+        Z0 = (120*np.pi) / (np.sqrt(ee) * (u + 1.393 + 0.667*np.log(u + 1.444)))
+    return Z0, ee
 
-# ------------------------------- 數值解 -------------------------------
-# 通用二分法求根：在 [lo, hi] 內找 f(x)=0
 
-def bisect_solve(f, lo, hi, tol=1e-9, max_iter=100):
-    f_lo = f(lo)
-    f_hi = f(hi)
-    if math.isnan(f_lo) or math.isnan(f_hi):
-        return None
-    # 如端點同號，嘗試逐步擴張區間（最多 6 次）
-    expand = 0
-    while f_lo * f_hi > 0 and expand < 6:
-        width = hi - lo
-        lo = max(lo - width, 1e-12)
-        hi = hi + width
-        f_lo, f_hi = f(lo), f(hi)
-        expand += 1
-    if f_lo * f_hi > 0:
-        return None
-    for _ in range(max_iter):
-        mid = 0.5 * (lo + hi)
-        f_mid = f(mid)
-        if abs(f_mid) < tol:
-            return mid
-        if f_lo * f_mid <= 0:
-            hi = mid
-            f_hi = f_mid
-        else:
-            lo = mid
-            f_lo = f_mid
-    return 0.5 * (lo + hi)
+def Hy_kernel(y, z, y0, z0):
+    return (z - z0) / ((y - y0)**2 + (z - z0)**2)
 
-# 解 w：給定 Z0, er, h -> w
 
-def solve_w(z0_target: float, er: float, h: float, t: float, w_min=1e-6, w_max=None):
-    if w_max is None:
-        w_max = 1e3 * h  # 非常寬的上界
-    def f(w):
-        return z0_from_wh_er(w, h, er, t) - z0_target
-    return bisect_solve(f, w_min, w_max)
+def J_uniform(y0, w):
+    return np.where(np.abs(y0) <= w/2, 1.0, 0.0)
 
-# 解 εr：給定 Z0, w, h -> er
 
-def solve_er(z0_target: float, w: float, h: float, t: float, er_min=1.0006, er_max=30.0):
-    def f(er):
-        return z0_from_wh_er(w, h, er, t) - z0_target
-    return bisect_solve(f, er_min, er_max)
+def J_edge(y0, w, eps=1e-9):
+    val = np.zeros_like(y0)
+    mask = np.abs(y0) < (w/2 - 1e-9)
+    yy = y0[mask]
+    denom = np.sqrt(np.maximum(1.0 - (2*yy/w)**2, eps))
+    val[mask] = 1.0/denom
+    return val
 
-# 解 h：給定 Z0, w, er -> h
 
-def solve_h(z0_target: float, w: float, er: float, t: float, h_min=1e-4, h_max=50.0):
-    # mm 為單位，預設上界 50 mm 已非常厚
-    def f(h):
-        return z0_from_wh_er(w, h, er, t) - z0_target
-    return bisect_solve(f, h_min, h_max)
+def normalize(y0, J):
+    area = np.trapz(J, y0)
+    return J/area if area != 0 else J
 
-# ------------------------------- UI：輸入 -------------------------------
-colL, colR = st.columns([1, 1])
-with colL:
-    solve_for = st.radio(
-        "選擇要求解的未知數",
-        options=["Z0 (Ω)", "w (mm)", "h (mm)", "εr (-)"],
-        horizontal=True,
-    )
-with colR:
-    t = st.number_input("導體厚度 t (mm，可選，0 代表忽略厚度修正)", min_value=0.0, value=0.0, step=0.005, format="%.5f")
 
-st.markdown("---")
+def moving_avg_1d(x, win_pts):
+    if win_pts <= 1:
+        return x
+    k = np.ones(2*win_pts+1)
+    k /= k.sum()
+    return np.convolve(x, k, mode='same')
 
-# 共用預設值
-_default = {
-    "Z0": 50.0,
-    "w": 0.5,
-    "h": 0.8,
-    "er": 4.2,
-}
+# ---------------------------------
+# Compute Hy once (quasi-static cross-line) and reuse for all panels
+# ---------------------------------
+Z0, eeff = Z0_hj(er, w, h)
+Pin_W = 1e-3 * 10**(Pin_dBm/10)
+I_rms = np.sqrt(Pin_W / Z0)
 
-if solve_for == "Z0 (Ω)":
-    w = st.number_input("線寬 w (mm)", min_value=1e-6, value=_default["w"], step=0.01, format="%.6f")
-    h = st.number_input("板厚 h (mm)", min_value=1e-6, value=_default["h"], step=0.01, format="%.6f")
-    er = st.number_input("相對介電常數 εr", min_value=1.0006, value=_default["er"], step=0.1, format="%.4f")
-elif solve_for == "w (mm)":
-    z0 = st.number_input("特性阻抗 Z0 (Ω)", min_value=1.0, value=_default["Z0"], step=0.5)
-    h = st.number_input("板厚 h (mm)", min_value=1e-6, value=_default["h"], step=0.01, format="%.6f")
-    er = st.number_input("相對介電常數 εr", min_value=1.0006, value=_default["er"], step=0.1, format="%.4f")
-elif solve_for == "h (mm)":
-    z0 = st.number_input("特性阻抗 Z0 (Ω)", min_value=1.0, value=_default["Z0"], step=0.5)
-    w = st.number_input("線寬 w (mm)", min_value=1e-6, value=_default["w"], step=0.01, format="%.6f")
-    er = st.number_input("相對介電常數 εr", min_value=1.0006, value=_default["er"], step=0.1, format="%.4f")
-else:  # εr
-    z0 = st.number_input("特性阻抗 Z0 (Ω)", min_value=1.0, value=_default["Z0"], step=0.5)
-    w = st.number_input("線寬 w (mm)", min_value=1e-6, value=_default["w"], step=0.01, format="%.6f")
-    h = st.number_input("板厚 h (mm)", min_value=1e-6, value=_default["h"], step=0.01, format="%.6f")
+y = np.arange(-y_span, y_span + 1e-12, DY)
+Ny = max(1201, int(401 * (w / (0.5e-3) + 1)))  # integration density adapts with width
+y0 = np.linspace(-w/2, w/2, Ny)
 
-solve_btn = st.button("🚀 開始計算")
+# Edge-current crowding + return current
+Jw   = normalize(y0, J_edge(y0, w) if USE_EDGE else J_uniform(y0, w))
+Jret = Jw.copy() if INCLUDE_RET else np.zeros_like(Jw)
 
-# ------------------------------- UI：輸出 -------------------------------
-if solve_btn:
-    try:
-        if solve_for == "Z0 (Ω)":
-            z0 = z0_from_wh_er(w, h, er, t)
-            eeff = epsilon_eff(er, w, h, t)
-            st.success(f"Z0 ≈ {z0:.3f} Ω")
-            st.caption(f"u = w_eff/h = {effective_width(w,h,t)/h:.5f}，ε_eff ≈ {eeff:.5f}")
-        elif solve_for == "w (mm)":
-            w_sol = solve_w(z0, er, h, t)
-            if w_sol is None or not math.isfinite(w_sol):
-                st.error("無法在合理範圍內收斂求得線寬，請調整輸入或上、下界。")
-            else:
-                eeff = epsilon_eff(er, w_sol, h, t)
-                st.success(f"w ≈ {w_sol:.6f} mm")
-                st.caption(f"u = w_eff/h = {effective_width(w_sol,h,t)/h:.5f}，ε_eff ≈ {eeff:.5f}")
-        elif solve_for == "h (mm)":
-            h_sol = solve_h(z0, w, er, t)
-            if h_sol is None or not math.isfinite(h_sol):
-                st.error("無法在合理範圍內收斂求得板厚，請調整輸入或上、下界。")
-            else:
-                eeff = epsilon_eff(er, w, h_sol, t)
-                st.success(f"h ≈ {h_sol:.6f} mm")
-                st.caption(f"u = w_eff/h = {effective_width(w,h_sol,t)/h_sol:.5f}，ε_eff ≈ {eeff:.5f}")
-        else:  # εr
-            er_sol = solve_er(z0, w, h, t)
-            if er_sol is None or not math.isfinite(er_sol):
-                st.error("無法在合理範圍內收斂求得 εr，請調整輸入或上、下界。")
-            else:
-                eeff = epsilon_eff(er_sol, w, h, t)
-                st.success(f"εr ≈ {er_sol:.6f}")
-                st.caption(f"u = w_eff/h = {effective_width(w,h,t)/h:.5f}，ε_eff ≈ {eeff:.5f}")
+Hy = np.zeros_like(y)
+for i, yy in enumerate(y):
+    Hy_fwd = np.trapz(Hy_kernel(yy, z_scan, y0, 0.0) * Jw,   y0)
+    Hy_ret = np.trapz(Hy_kernel(yy, z_scan, y0, -h)  * Jret, y0)
+    Hy[i]  = (I_rms/(2*np.pi)) * (Hy_fwd - Hy_ret)
 
-        with st.expander("📎 提示與限制"):
-            st.markdown(
-                """
-                - 本計算為**準靜態**模型，未含頻散、損耗、表面粗糙度、綠漆/阻焊層影響；高頻或嚴格容限請用 2D 場解或板廠阻抗表校核。
-                - 厚度修正採常見近似：$w_\text{eff} = w + \frac{t}{\pi}\big(1 + \ln\frac{2h}{t}\big)$（t=0 則不修正）。
-                - 典型適用範圍：$10^{-3} \lesssim w/h \lesssim 10^{3}$，$1 \leq \varepsilon_r \leq 30$；超出時結果僅供參考。
-                """
-            )
+# Probe aperture averaging
+R = (probe_diam_mm * 1e-3) / 2.0
+win_pts = int(np.ceil(R / DY))
+Hy = moving_avg_1d(Hy, win_pts)
 
-    except Exception as e:
-        st.exception(e)
+H_uA = np.maximum(np.abs(Hy) * 1e6, 1e-6)
+Hy_dB = 20*np.log10(H_uA)
 
-with st.expander("📚 公式說明（簡要）"):
-    st.markdown(
-        r"""
-        **特性阻抗**（以等效寬度 $w_\text{eff}$ 和 $u=w_\text{eff}/h$ 表示）：
-        $$
-        Z_0 = \begin{cases}
-        \dfrac{60}{\sqrt{\varepsilon_\text{eff}}}\ln\!\left(\dfrac{8}{u}+0.25u\right), & u\le 1 \\
-        \dfrac{120\pi}{\sqrt{\varepsilon_\text{eff}}\,\big(u+1.393+0.667\ln(u+1.444)\big)}, & u>1
-        \end{cases}
-        $$
-        **有效介電常數**（常見近似）：
-        $$
-        \varepsilon_\text{eff} \approx \frac{\varepsilon_r+1}{2} + \frac{\varepsilon_r-1}{2}\left(\frac{1}{\sqrt{1+12/u}} + \delta\right),\quad \delta = \begin{cases}0.04(1-u)^2,& u<1\\ 0,& u\ge 1\end{cases}
-        $$
-        **厚度修正**：$\;w_\text{eff} = w + \dfrac{t}{\pi}\big(1+\ln\tfrac{2h}{t}\big)$（當 $t>0$ 時）。
-        """
-    )
+# Parse frequencies
+try:
+    freqs = [float(s.strip()) for s in freq_text.split(',') if s.strip()]
+except Exception:
+    freqs = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
 
-st.markdown("---")
-st.caption("© 計算公式：Hammerstad-Jensen 準靜態閉式近似；結果僅供設計初估。")
+nF = len(freqs)
+
+# Determine subplot grid
+if nF <= 3:
+    nrow, ncol = 1, nF
+elif nF <= 6:
+    nrow, ncol = 2, (3 if nF>3 else nF)
+else:
+    ncol = 3
+    nrow = int(np.ceil(nF / ncol))
+
+fig, axes = plt.subplots(nrow, ncol, figsize=(4.2*ncol+0.4, 3.3*nrow+0.6), sharex=True, sharey=True)
+axes = np.array(axes).reshape(-1)
+
+for k, f in enumerate(freqs):
+    if k >= len(axes):
+        break
+    ax = axes[k]
+    ax.plot(y*1e3, Hy_dB, 'k--', lw=1.8, label='Simulated (quasi-static)')
+    ax.set_title(f'f = {f:.3g} GHz')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-Y_SPAN_MM, Y_SPAN_MM)
+    if (k % ncol) == 0:
+        ax.set_ylabel(r'$H_y$ [dB $\mu$A/m]')
+    if k // ncol == (nrow-1):
+        ax.set_xlabel('Position y [mm]')
+
+# Hide any unused axes
+for j in range(k+1, len(axes)):
+    axes[j].axis('off')
+
+if len(freqs) > 0:
+    axes[min(1, len(axes)-1)].legend(loc='lower left', fontsize=9, frameon=False)
+
+plt.tight_layout()
+st.pyplot(fig, clear_figure=True)
+
+# Metrics and CSV
+m1, m2, m3, m4 = st.columns(4)
+m1.metric('Z0 [Ω] (est.)', f'{Z0:.2f}')
+m2.metric('ε_eff (est.)', f'{eeff:.3f}')
+m3.metric('I_rms on line [mA]', f'{I_rms*1e3:.3f}')
+m4.metric('Defaults', f'z={Z_SCAN_MM:.1f} mm, span=±{Y_SPAN_MM:.0f} mm, dy={DY_MM:.1f} mm, Pin={PIN_DBM:.1f} dBm')
+
+csv_df = pd.DataFrame({'y_mm': y*1e3, 'Hy_A_per_m': Hy, 'Hy_dB_uA_per_m': Hy_dB})
+buf = io.StringIO(); csv_df.to_csv(buf, index=False)
+st.download_button('Download CSV (single profile reused across panels)', buf.getvalue(), file_name='Hy_crossline_profile.csv', mime='text/csv')
