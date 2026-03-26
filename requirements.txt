@@ -1,2 +1,6 @@
-streamlit
+
+# requirements.txt（示例，按你實際需要增減）
+streamlit>=1.33
+matplotlib
 numpy
+pandas
