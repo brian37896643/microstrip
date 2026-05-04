@@ -1,13 +1,13 @@
-# Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-
-# Virtual env
 .venv/
-
-# OS & misc
-.DS_Store
-.env
+venv/
 .streamlit/secrets.toml
+data_store_admin/
+data_store_frontend/
+data_store_backend/
+data_store_*/
+.DS_Store
+.vscode/
+*.creds
+*.key
