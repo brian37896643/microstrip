@@ -1,13 +1,46 @@
+# -------------------
+# Python
+# -------------------
 __pycache__/
-*.pyc
-.venv/
+*.py[cod]
+*.so
+*.log
+
+# -------------------
+# Virtual env
+# -------------------
 venv/
-.streamlit/secrets.toml
-data_store_admin/
-data_store_frontend/
-data_store_backend/
-data_store_*/
+.venv/
+
+# -------------------
+# Streamlit
+# -------------------
+.streamlit/
+
+# -------------------
+# OS / Editor
+# -------------------
 .DS_Store
+Thumbs.db
 .vscode/
-*.creds
-*.key
+.idea/
+
+# -------------------
+# Windows "Mark of the Web" artifacts
+# -------------------
+*:Zone.Identifier
+
+# -------------------
+# Data / outputs (避免不小心把量測資料推上去)
+# -------------------
+*.csv
+
+# (可選) 你的 data_store 類資料夾通常不該上 repo
+data_store/
+data_store_admin/
+data_store_backend/
+data_store_frontend/
+
+# (可選) 匯出檔
+*.png
+*.html

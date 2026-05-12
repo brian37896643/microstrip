@@ -1,59 +1,68 @@
+# microstrip (Streamlit Plotly CSV Plotter)
 
-# Microstrip Calculators (Streamlit)
+一個 Streamlit 小工具：上傳多個 CSV 疊圖、每條曲線可勾選顯示/隱藏、可手動改圖例名稱、支援 X 軸線性/對數，並支援 PNG/HTML 下載。
 
-一組可直接使用的 **微帶線計算器**：
-- **`app_4in1_vertical_v2.py`**：四求一一般版（可解 Z0、w、h、εr、t），右側 **進階（搜尋上下界）置頂**。
-- **`app_4in1.py`**：四求一（含 t），水平版面。
-- **`app_4in1_vertical.py`**：四求一（含 t），左直排 + 右結果。
-- **`tuner_50ohm.py`**：固定三個自動求解 **命中目標 Z0**（預設 50 Ω，可改）。
-- **`app.py`**：通用資料分析範例（非微帶線；可忽略）。
-
-> 公式採 **Hammerstad–Jensen 準靜態閉式（含厚度修正）**，適合單端外層微帶的尺寸**初估/反算**，未含頻散、損耗、阻焊層、粗糙度等；嚴格容差請用 2D/3D 場解或板廠阻抗表校核。
+> ✅ 你要的「放大後的圖」下載方式：  
+> 請先點圖右上角 **Fullscreen**，再點 **相機（Download plot as png）**，下載的就是放大狀態的 PNG。
 
 ---
 
-## 快速開始（本機 / WSL）
+## Features
+- 多 CSV 疊圖（可多選上傳）
+- 每條曲線旁有勾選框：顯示/隱藏
+- 圖例名稱可手動修改
+- X 軸：線性 / 對數（預設對數）
+- 下載：
+  - **Fullscreen 後用 Plotly 相機下載**（最符合「放大後」）
+  - App 內「固定規格 PNG」下載（需要 kaleido + Chrome）
+  - 互動式 HTML 下載
 
+---
+
+## Quick Start
+
+### 1) 安裝套件
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
-
-# 建議使用這個做為入口：
-streamlit run app_4in1_vertical_v2.py
-# 或：streamlit run tuner_50ohm.py
 ```
 
-打開瀏覽器 `http://localhost:8501` 即可使用。
+### 2) 執行
+```bash
+streamlit run app6.py
+```
 
 ---
 
-## 在 Streamlit Community Cloud 分享
+## PNG 下載說明
 
-1. **Fork** 或 **Push** 本 repo 到你的 GitHub 帳號。
-2. 打開 <https://share.streamlit.io>，登入後 **New app**。
-3. 選擇 repo 與 branch，**Main file path** 指向 `app_4in1_vertical_v2.py`。
-4. Deploy 後把產生的 **Public URL** 分享給同事即可。
+### A) 下載「放大後」的 PNG（推薦）
+1. 圖右上角按 **Fullscreen**
+2. 再按 **相機 Download plot as png**
 
-> Community Cloud 會自動依 `requirements.txt` 安裝相依套件；若新增套件，記得更新 `requirements.txt`。
+> 這個方式在瀏覽器端輸出，會最貼近你當下放大的畫面。
+
+### B) App 內「固定規格 PNG」下載（伺服器端）
+- 需要 `kaleido` + Chrome/Chromium
+- Linux/headless 環境常見要補系統依賴套件
+
+#### Chrome 安裝（無 root 也可）
+```bash
+plotly_get_chrome
+```
+
+#### Ubuntu/Debian 常見系統依賴（需要 sudo）
+```bash
+sudo apt update
+sudo apt-get install -y   libnss3 libatk-bridge2.0-0 libcups2   libxcomposite1 libxdamage1 libxfixes3 libxrandr2   libgbm1 libxkbcommon0   libpango-1.0-0 libcairo2   libasound2
+```
 
 ---
 
-## 專案結構建議
-
-```
-my_streamlit_app/
-├─ app_4in1_vertical_v2.py
-├─ tuner_50ohm.py
-├─ app_4in1.py
-├─ app_4in1_vertical.py
-├─ requirements.txt
-├─ .gitignore
-└─ README.md
-```
+## Repo 建議
+- 建議不要把量測資料（CSV）、資料庫資料夾、快取資料推上 GitHub
+- Windows 下載/搬檔可能產生 `*:Zone.Identifier`，已在 `.gitignore` 忽略
 
 ---
 
 ## License
-
-預設未附授權；若需對外公開，建議加上 **MIT License** 或公司內部授權政策。
+Internal / private use (adjust if needed).
