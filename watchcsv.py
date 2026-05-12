@@ -1,4 +1,5 @@
 import io
+import os
 import hashlib
 from typing import Optional
 
@@ -8,15 +9,17 @@ import streamlit as st
 import plotly.graph_objects as go
 
 
-st.set_page_config(page_title="CSV → 折線圖（線性/對數）", layout="wide")
-st.title("CSV 轉折線圖（預設：對數 Log）")
-st.caption("X 軸：頻率｜Y 軸：dB｜支援多 CSV 疊圖｜預設：對數(Log)｜支援 Fullscreen 後下載 PNG")
+# -------------------------
+# Page
+# -------------------------
+st.set_page_config(page_title="WatchCSV Plotter", layout="wide")
+st.title("CSV 疊圖（Plotly）")
+st.caption("✅ 放大後下載 PNG：請按圖右上角 Fullscreen → 相機（Download plot as png）")
 
 
 # -------------------------
 # Helpers
 # -------------------------
-
 def _decode_bytes(raw: bytes) -> str:
     for enc in ("utf-8-sig", "utf-8", "cp950"):
         try:
@@ -27,7 +30,9 @@ def _decode_bytes(raw: bytes) -> str:
 
 
 def read_csv_robust_bytes(raw: bytes) -> pd.DataFrame:
-    """Read CSV allowing comment lines (#) and mild format variations."""
+    """
+    讀取含 '#' 註解行的儀器 CSV，並做編碼容錯。
+    """
     text = _decode_bytes(raw)
     df = pd.read_csv(io.StringIO(text), comment="#", engine="python")
     df.columns = [str(c).strip() for c in df.columns]
@@ -35,7 +40,9 @@ def read_csv_robust_bytes(raw: bytes) -> pd.DataFrame:
 
 
 def coerce_numeric(df: pd.DataFrame, good_ratio: float = 0.8) -> pd.DataFrame:
-    """Convert object columns to numeric when most values are numeric."""
+    """
+    只針對 object 欄位嘗試轉數字；若大多數可轉才採用 numeric。
+    """
     out = df.copy()
     for c in out.columns:
         s = out[c]
@@ -54,7 +61,10 @@ def unit_scale(unit: str) -> float:
 
 
 def pick_default_xy(df: pd.DataFrame):
-    """Pick Frequency-like column for X and a varying numeric column for Y."""
+    """
+    自動挑 Frequency 當 x；
+    y 會避開幾乎全 0 的欄，偏好變化較大的欄（比較像 dB 曲線）。
+    """
     cols = list(df.columns)
 
     x_default = None
@@ -94,7 +104,9 @@ def downsample_df(df: pd.DataFrame, max_points: int) -> pd.DataFrame:
 
 
 def make_trace_id(filename: str, raw: bytes) -> str:
-    """Stable-ish id to avoid collisions when filenames repeat."""
+    """
+    用 (檔名 + 檔案內容hash) 當 id，避免同名覆蓋。
+    """
     h = hashlib.md5(raw).hexdigest()[:10]
     return f"{filename}__{h}"
 
@@ -109,22 +121,18 @@ def kaleido_available() -> bool:
 
 def show_png_help(err: Optional[Exception] = None):
     st.error(
-        "PNG 匯出需要 Kaleido + Chrome/Chromium。\n\n"
-        "✅ 你可以試：\n"
-        "- 安裝 kaleido：`pip install -U kaleido`\n"
-        "- 安裝 Chrome：`plotly_get_chrome`（或 `kaleido_get_chrome` / `choreo_get_chrome`）\n"
-        "- 若 Chrome 已裝但仍失敗，通常是系統缺依賴（Ubuntu/Debian 常見要裝 libnss3、libgbm1、libasound2...）\n"
+        "伺服器端 PNG 匯出需要 Kaleido + Chrome/Chromium。\n\n"
+        "但 Streamlit Community Cloud 常因環境限制無法提供 Chrome，"
+        "所以本 App 預設停用伺服器端 PNG。\n\n"
+        "✅ 請改用右上角 Fullscreen → 相機下載（Download plot as png）。"
     )
     if err is not None:
         st.caption(f"錯誤摘要：{type(err).__name__}: {err}")
 
 
 # -------------------------
-# State
+# State: keep traces even if user removes one file from uploader
 # -------------------------
-# 只要從 uploader 刪掉一筆，Streamlit 會 rerun，uploaded_files 可能瞬間變空，造成圖整個不見。
-# 解法：把檔案內容存到 session_state，並提供「在 app 裡刪除」的按鈕。
-
 if "trace_store" not in st.session_state:
     # trace_id -> {file_name: str, raw: bytes}
     st.session_state.trace_store = {}
@@ -139,6 +147,7 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
+# 將新上傳的檔案加入 store（不會因為你從 uploader 刪除就消失）
 if uploaded_files:
     for uf in uploaded_files:
         raw = uf.getvalue()
@@ -147,6 +156,7 @@ if uploaded_files:
             st.session_state.trace_store[tid] = {"file_name": uf.name, "raw": raw}
 
 left, right = st.columns([1, 2], gap="large")
+
 
 # -------------------------
 # Left: settings & delete
@@ -158,7 +168,7 @@ with left:
     trace_ids = list(store.keys())
 
     if not trace_ids:
-        st.info("請先用上方 uploader 上傳一個或多個 CSV。上傳後資料會暫存在本次 session。")
+        st.info("請先用上方 uploader 上傳一個或多個 CSV。")
 
     def _fmt_tid(tid: str) -> str:
         return store.get(tid, {}).get("file_name", tid)
@@ -191,12 +201,11 @@ with left:
 
     st.divider()
 
-    # X-axis scale
+    # X axis scale
     x_scale_mode = st.radio("X 軸尺度", ["線性", "對數 Log（預設）"], index=1)
 
     freq_unit = st.selectbox("頻率顯示單位", ["Hz", "kHz", "MHz", "GHz"], index=2)
     max_points = st.number_input("每條線最多點數（downsample，0=不限制）", min_value=0, value=5000, step=500)
-
     chart_height = st.slider("圖高度（px）", min_value=500, max_value=1200, value=850, step=50)
 
     st.divider()
@@ -214,12 +223,14 @@ with left:
 
     st.divider()
 
-    st.markdown("**Fullscreen 後用相機下載 PNG**（右上角工具列）")
+    st.markdown("**相機下載 PNG（放大後最準）**")
     modebar_png_scale = st.number_input(
         "相機下載 PNG 的解析度倍率（scale）",
         min_value=1.0, max_value=6.0, value=3.0, step=0.5
     )
     modebar_png_name = st.text_input("相機下載 PNG 的檔名", value="plot_fullscreen")
+
+    st.caption("提示：要下載「放大後的圖」，請先按右上角 Fullscreen，再按相機。")
 
 
 # -------------------------
@@ -332,6 +343,7 @@ with right:
 
             y = pd.to_numeric(tmp[y_col], errors="coerce").to_numpy(dtype=float)
             mask = np.isfinite(x) & np.isfinite(y)
+
             if x_scale_mode.startswith("對數"):
                 mask = mask & (x > 0)
 
@@ -408,30 +420,43 @@ with right:
 
     st.plotly_chart(fig, width="stretch", config=plotly_cfg)
 
-    st.info("✅ 要下載『放大後的圖』：請先按右上角 Fullscreen，再按相機（Download plot as png）。")
+    st.success("要下載「放大後的圖」：請先按右上角 Fullscreen，再按相機（Download plot as png）。")
 
     # -------------------------
-    # Download section: server-side export (固定規格)
+    # Download section
     # -------------------------
-    st.markdown("### 下載（伺服器端固定規格）")
+    st.markdown("## 下載")
+
     col_a, col_b = st.columns([1, 2])
 
     with col_a:
-        if not kaleido_available():
-            st.warning("目前環境缺少 kaleido，無法輸出 PNG。請安裝：`pip install -U kaleido`")
+        st.markdown("### 下載（伺服器端固定規格）")
+
+        # 方案1：預設停用伺服器端 PNG，避免 Streamlit Cloud 出現 Kaleido/Chrome 錯誤。
+        # 如果你未來要在「自己的 server」啟用，打開下面的勾選即可。
+        enable_server_png = st.checkbox("啟用伺服器端 PNG（需要 kaleido + Chrome）", value=False)
+
+        if not enable_server_png:
+            st.info("已停用伺服器端 PNG（Cloud 常缺 Chrome）。\n"
+                    "✅ 請用右上角 Fullscreen → 相機下載（Download plot as png）。")
         else:
-            try:
-                png_bytes = fig.to_image(format="png", scale=2)
-                st.download_button(
-                    "下載 PNG（固定規格）",
-                    data=png_bytes,
-                    file_name="plot.png",
-                    mime="image/png",
-                )
-            except Exception as e:
-                show_png_help(e)
+            # 只有使用者強制開啟時才嘗試，避免 Cloud 預設噴錯
+            if not kaleido_available():
+                show_png_help(Exception("kaleido not installed"))
+            else:
+                try:
+                    png_bytes = fig.to_image(format="png", scale=2)
+                    st.download_button(
+                        "下載 PNG（固定規格）",
+                        data=png_bytes,
+                        file_name="plot.png",
+                        mime="image/png",
+                    )
+                except Exception as e:
+                    show_png_help(e)
 
     with col_b:
+        st.markdown("### 下載互動圖（HTML）")
         html = fig.to_html(include_plotlyjs="cdn")
         st.download_button(
             "下載互動圖（HTML）",
