@@ -1,7 +1,5 @@
 import io
-import os
 import hashlib
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -30,9 +28,7 @@ def _decode_bytes(raw: bytes) -> str:
 
 
 def read_csv_robust_bytes(raw: bytes) -> pd.DataFrame:
-    """
-    讀取含 '#' 註解行的儀器 CSV，並做編碼容錯。
-    """
+    """讀取含 '#' 註解行的儀器 CSV，並做編碼容錯。"""
     text = _decode_bytes(raw)
     df = pd.read_csv(io.StringIO(text), comment="#", engine="python")
     df.columns = [str(c).strip() for c in df.columns]
@@ -40,9 +36,7 @@ def read_csv_robust_bytes(raw: bytes) -> pd.DataFrame:
 
 
 def coerce_numeric(df: pd.DataFrame, good_ratio: float = 0.8) -> pd.DataFrame:
-    """
-    只針對 object 欄位嘗試轉數字；若大多數可轉才採用 numeric。
-    """
+    """只針對 object 欄位嘗試轉數字；若大多數可轉才採用 numeric。"""
     out = df.copy()
     for c in out.columns:
         s = out[c]
@@ -61,10 +55,7 @@ def unit_scale(unit: str) -> float:
 
 
 def pick_default_xy(df: pd.DataFrame):
-    """
-    自動挑 Frequency 當 x；
-    y 會避開幾乎全 0 的欄，偏好變化較大的欄（比較像 dB 曲線）。
-    """
+    """自動挑 Frequency 當 x；y 會避開幾乎全 0 的欄，偏好變化較大的欄。"""
     cols = list(df.columns)
 
     x_default = None
@@ -104,34 +95,13 @@ def downsample_df(df: pd.DataFrame, max_points: int) -> pd.DataFrame:
 
 
 def make_trace_id(filename: str, raw: bytes) -> str:
-    """
-    用 (檔名 + 檔案內容hash) 當 id，避免同名覆蓋。
-    """
+    """用 (檔名 + 檔案內容hash) 當 id，避免同名覆蓋。"""
     h = hashlib.md5(raw).hexdigest()[:10]
     return f"{filename}__{h}"
 
 
-def kaleido_available() -> bool:
-    try:
-        import kaleido  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-def show_png_help(err: Optional[Exception] = None):
-    st.error(
-        "伺服器端 PNG 匯出需要 Kaleido + Chrome/Chromium。\n\n"
-        "但 Streamlit Community Cloud 常因環境限制無法提供 Chrome，"
-        "所以本 App 預設停用伺服器端 PNG。\n\n"
-        "✅ 請改用右上角 Fullscreen → 相機下載（Download plot as png）。"
-    )
-    if err is not None:
-        st.caption(f"錯誤摘要：{type(err).__name__}: {err}")
-
-
 # -------------------------
-# State: keep traces even if user removes one file from uploader
+# State
 # -------------------------
 if "trace_store" not in st.session_state:
     # trace_id -> {file_name: str, raw: bytes}
@@ -139,7 +109,7 @@ if "trace_store" not in st.session_state:
 
 
 # -------------------------
-# UI: uploader (新增資料)
+# Uploader
 # -------------------------
 uploaded_files = st.file_uploader(
     "上傳 CSV（可多選；用來『新增』資料）",
@@ -201,9 +171,7 @@ with left:
 
     st.divider()
 
-    # X axis scale
     x_scale_mode = st.radio("X 軸尺度", ["線性", "對數 Log（預設）"], index=1)
-
     freq_unit = st.selectbox("頻率顯示單位", ["Hz", "kHz", "MHz", "GHz"], index=2)
     max_points = st.number_input("每條線最多點數（downsample，0=不限制）", min_value=0, value=5000, step=500)
     chart_height = st.slider("圖高度（px）", min_value=500, max_value=1200, value=850, step=50)
@@ -229,12 +197,11 @@ with left:
         min_value=1.0, max_value=6.0, value=3.0, step=0.5
     )
     modebar_png_name = st.text_input("相機下載 PNG 的檔名", value="plot_fullscreen")
-
     st.caption("提示：要下載「放大後的圖」，請先按右上角 Fullscreen，再按相機。")
 
 
 # -------------------------
-# Right: plot
+# Right: plot + HTML download only
 # -------------------------
 with right:
     st.subheader("疊圖結果")
@@ -246,7 +213,6 @@ with right:
         st.info("請先上傳 CSV。")
         st.stop()
 
-    # decide default x/y from first trace
     df0 = coerce_numeric(read_csv_robust_bytes(store[trace_ids[0]]["raw"]))
     x_def, y_def = pick_default_xy(df0)
 
@@ -268,7 +234,6 @@ with right:
     else:
         y_col = None
 
-    # checkbox show/hide + rename (no green warning: don't pass value when key exists)
     st.markdown("**資料顯示（勾選）與圖例名稱（可手動改）**")
 
     b1, b2, _ = st.columns([1, 1, 6])
@@ -291,7 +256,6 @@ with right:
         show_key = f"show_{tid}"
         label_key = f"label_{tid}"
 
-        # set defaults only once
         if show_key not in st.session_state:
             st.session_state[show_key] = True
         if label_key not in st.session_state:
@@ -308,7 +272,6 @@ with right:
         st.info("目前沒有勾選任何資料可畫圖。請勾選要顯示的資料。")
         st.stop()
 
-    # build figure
     fig = go.Figure()
     fig.update_layout(
         template="plotly_white",
@@ -405,7 +368,6 @@ with right:
     if x_scale_mode.startswith("對數"):
         fig.update_xaxes(type="log")
 
-    # ✅ Plotly modebar config: Fullscreen 後按相機下載 = 放大後當下尺寸
     plotly_cfg = {
         "displayModeBar": True,
         "displaylogo": False,
@@ -414,53 +376,18 @@ with right:
             "format": "png",
             "filename": modebar_png_name,
             "scale": float(modebar_png_scale),
-            # width/height 不填：用當下顯示尺寸（最貼近 fullscreen）
         },
     }
 
     st.plotly_chart(fig, width="stretch", config=plotly_cfg)
-
     st.success("要下載「放大後的圖」：請先按右上角 Fullscreen，再按相機（Download plot as png）。")
 
-    # -------------------------
-    # Download section
-    # -------------------------
-    st.markdown("## 下載")
-
-    col_a, col_b = st.columns([1, 2])
-
-    with col_a:
-        st.markdown("### 下載（伺服器端固定規格）")
-
-        # 方案1：預設停用伺服器端 PNG，避免 Streamlit Cloud 出現 Kaleido/Chrome 錯誤。
-        # 如果你未來要在「自己的 server」啟用，打開下面的勾選即可。
-        enable_server_png = st.checkbox("啟用伺服器端 PNG（需要 kaleido + Chrome）", value=False)
-
-        if not enable_server_png:
-            st.info("已停用伺服器端 PNG（Cloud 常缺 Chrome）。\n"
-                    "✅ 請用右上角 Fullscreen → 相機下載（Download plot as png）。")
-        else:
-            # 只有使用者強制開啟時才嘗試，避免 Cloud 預設噴錯
-            if not kaleido_available():
-                show_png_help(Exception("kaleido not installed"))
-            else:
-                try:
-                    png_bytes = fig.to_image(format="png", scale=2)
-                    st.download_button(
-                        "下載 PNG（固定規格）",
-                        data=png_bytes,
-                        file_name="plot.png",
-                        mime="image/png",
-                    )
-                except Exception as e:
-                    show_png_help(e)
-
-    with col_b:
-        st.markdown("### 下載互動圖（HTML）")
-        html = fig.to_html(include_plotlyjs="cdn")
-        st.download_button(
-            "下載互動圖（HTML）",
-            data=html.encode("utf-8"),
-            file_name="plot.html",
-            mime="text/html",
-        )
+    # ✅ 只保留 HTML 下載
+    st.markdown("## 下載互動圖（HTML）")
+    html = fig.to_html(include_plotlyjs="cdn")
+    st.download_button(
+        "下載互動圖（HTML）",
+        data=html.encode("utf-8"),
+        file_name="plot.html",
+        mime="text/html",
+    )
